@@ -1,0 +1,269 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <random>
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+
+using namespace std;
+
+constexpr int INPUT = 784;
+constexpr int HIDDEN = 128;
+constexpr int OUTPUT = 10;
+
+struct Sample {
+    vector<double> x;
+    int label;
+};
+
+mt19937 rng(42);
+
+double randomWeight() {
+    normal_distribution<double> d(0.0, sqrt(2.0 / INPUT));
+    return d(rng);
+}
+
+vector<Sample> loadCSV(const string& filename) {
+    vector<Sample> data;
+    ifstream file(filename);
+    string line;
+
+    if (!file) {
+        cerr << "Не удалось открыть " << filename << '\n';
+        return data;
+    }
+
+    while (getline(file, line)) {
+        stringstream ss(line);
+        string cell;
+        vector<double> values;
+
+        while (getline(ss, cell, ',')) {
+            try {
+                values.push_back(stod(cell));
+            } catch (...) {
+                values.clear();
+                break;
+            }
+        }
+
+        if (values.size() != INPUT + 1)
+            continue;
+
+        int label = static_cast<int>(values[0]);
+        if (label < 0  label >= OUTPUT)
+            continue;
+
+        Sample s;
+        s.label = label;
+        s.x.resize(INPUT);
+
+        for (int i = 0; i < INPUT; ++i)
+            s.x[i] = values[i + 1] / 255.0;
+
+        data.push_back(s);
+    }
+
+    return data;
+}
+
+struct NeuralNetwork {
+    vector<vector<double>> W1, W2;
+    vector<double> b1, b2;
+
+    NeuralNetwork() {
+        W1.assign(HIDDEN, vector<double>(INPUT));
+        W2.assign(OUTPUT, vector<double>(HIDDEN));
+        b1.assign(HIDDEN, 0.0);
+        b2.assign(OUTPUT, 0.0);
+
+        for (auto& row : W1)
+            for (double& w : row)
+                w = randomWeight();
+
+        normal_distribution<double> d(0.0, sqrt(2.0 / HIDDEN));
+        for (auto& row : W2)
+            for (double& w : row)
+                w = d(rng);
+    }
+
+    vector<double> predict(const vector<double>& x) {
+        vector<double> h(HIDDEN, 0.0);
+        vector<double> out(OUTPUT, 0.0);
+
+        for (int j = 0; j < HIDDEN; ++j) {
+            h[j] = b1[j];
+            for (int i = 0; i < INPUT; ++i)
+                h[j] += W1[j][i] * x[i];
+
+            h[j] = max(0.0, h[j]); // ReLU
+        }
+
+        for (int k = 0; k < OUTPUT; ++k) {
+            out[k] = b2[k];
+            for (int j = 0; j < HIDDEN; ++j)
+                out[k] += W2[k][j] * h[j];
+        }
+
+        // Softmax с защитой от переполнения
+        double mx = *max_element(out.begin(), out.end());
+        double sum = 0.0;
+
+        for (double& v : out) {
+            v = exp(v - mx);
+            sum += v;
+        }
+
+        for (double& v : out)
+            v /= sum;
+
+        return out;
+    }
+
+    void trainOne(const Sample& s, double lr) {
+        vector<double> z1(HIDDEN, 0.0);
+        vector<double> h(HIDDEN, 0.0);
+        vector<double> z2(OUTPUT, 0.0);
+        vector<double> out(OUTPUT, 0.0);
+
+        // Прямое распространение
+        for (int j = 0; j < HIDDEN; ++j) {
+            z1[j] = b1[j];
+            for (int i = 0; i < INPUT; ++i)
+                z1[j] += W1[j][i] * s.x[i];
+
+            h[j] = max(0.0, z1[j]);
+        }
+
+        for (int k = 0; k < OUTPUT; ++k) {
+            z2[k] = b2[k];
+            for (int j = 0; j < HIDDEN; ++j)
+                z2[k] += W2[k][j] * h[j];
+        }
+
+        double mx = *max_element(z2.begin(), z2.end());
+        double sum = 0.0;
+
+        for (int k = 0; k < OUTPUT; ++k) {
+            out[k] = exp(z2[k] - mx);
+            sum += out[k];
+        }
+
+        for (double& v : out)
+            v /= sum;
+
+        // Ошибка выходного слоя: softmax + cross-entropy
+        vector<double> delta2 = out;
+        delta2[s.label] -= 1.0;
+
+        // Ошибка скрытого слоя
+        vector<double> delta1(HIDDEN, 0.0);
+
+        for (int j = 0; j < HIDDEN; ++j) {
+            for (int k = 0; k < OUTPUT; ++k)
+                delta1[j] += W2[k][j] * delta2[k];
+
+            if (z1[j] <= 0.0)
+                delta1[j] = 0.0;
+        }
+
+        // Обновление весов выходного слоя
+        for (int k = 0; k < OUTPUT; ++k) {
+            for (int j = 0; j < HIDDEN; ++j)
+                W2[k][j] -= lr * delta2[k] * h[j];
+
+            b2[k] -= lr * delta2[k];
+        }
+
+        // Обновление весов скрытого слоя
+        for (int j = 0; j < HIDDEN; ++j) {
+            for (int i = 0; i < INPUT; ++i)
+                W1[j][i] -= lr * delta1[j] * s.x[i];
+
+            b1[j] -= lr * delta1[j];
+        }
+    }
+
+    double accuracy(const vector<Sample>& data) {
+        if (data.empty()) return 0.0;
+
+        int correct = 0;
+
+        for (const auto& s : data) {
+            auto p = predict(s.x);
+            int guess = max_element(p.begin(), p.end())
+                        - p.begin();
+
+            if (guess == s.label)
+                ++correct;
+        }
+
+        return 100.0 * correct / data.size();
+    }
+
+    void save(const string& filename) {
+        ofstream f(filename);
+
+        for (const auto& row : W1)
+            for (double w : row) f << w << '\n';
+
+        for (double b : b1) f << b << '\n';
+
+        for (const auto& row : W2)
+            for (double w : row) f << w << '\n';
+
+        for (double b : b2) f << b << '\n';
+
+        cout << "Модель сохранена в " << filename << '\n';
+    }
+};
+
+int main() {
+    cout << "Загрузка данных...\n";
+
+    auto trainData = loadCSV("mnist_train.csv");
+    auto testData  = loadCSV("mnist_test.csv");
+
+    if (trainData.empty()  testData.empty()) {
+        cout << "Положи mnist_train.csv и mnist_test.csv "
+                "рядом с программой.\n";
+        cout << "Формат: метка,784 пикселя (0-255).\n";
+        return 1;
+    }
+
+    cout << "Обучающих примеров: " << trainData.size() << '\n';
+    cout << "Тестовых примеров: " << testData.size() << '\n';
+
+    NeuralNetwork nn;
+    const int epochs = 10;
+    const double learningRate = 0.01;
+
+    for (int epoch = 0; epoch < epochs; ++epoch) {
+        shuffle(trainData.begin(), trainData.end(), rng);
+
+        for (const auto& sample : trainData)
+            nn.trainOne(sample, learningRate);
+
+        cout << "Эпоха " << epoch + 1 << "/" << epochs
+             << " | точность: "
+             << nn.accuracy(testData) << "%\n";
+    }
+
+    nn.save("mnist_model.txt");
+
+    cout << "\nПримеры предсказаний:\n";
+
+    for (int i = 0; i < min(10, (int)testData.size()); ++i) {
+        auto p = nn.predict(testData[i].x);
+        int guess = max_element(p.begin(), p.end()) - p.begin();
+
+        cout << "Правильная цифра: " << testData[i].label
+             << " | Предсказание: " << guess
+             << " | Уверенность: " << p[guess] * 100.0
+             << "%\n";
+    }
+
+    return 0;
+}
